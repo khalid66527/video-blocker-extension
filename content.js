@@ -1,9 +1,8 @@
 /**
  * Universal Video Blocker - Content Script
- * 
- * Executed at `document_start` across frames.
- * Checks user settings from storage to selectively activate video blocking only on
- * enabled platforms (YouTube, Facebook, Instagram, TikTok, etc.) or user-added custom domains.
+ * Executed at `document_start` in ISOLATED world.
+ * Manages domain/route checking, DOM mutation monitoring, and setting data attributes
+ * for inject.js (MAIN world) to block videos without CSP inline script errors.
  */
 
 (function () {
@@ -23,6 +22,18 @@
     vimeo: ['vimeo.com', 'vimeocdn.com'],
     dailymotion: ['dailymotion.com', 'dmcdn.net']
   };
+
+  // Specific route patterns where video content is primary
+  const VIDEO_ROUTES = [
+    /\/reel\//i,
+    /\/reels\//i,
+    /\/watch/i,
+    /\/shorts/i,
+    /\/videos\//i,
+    /\/story\.php/i,
+    /\/tv\//i,
+    /\/video\//i
+  ];
 
   function isDomainMatch(hostname, domain) {
     if (!hostname || !domain) return false;
@@ -59,122 +70,7 @@
   let domObserver = null;
 
   /**
-   * SECTION 1: MAIN WORLD JS INJECTION
-   */
-  function injectMainWorldEngine() {
-    if (window.__uvbMainWorldScriptInjected) return;
-    window.__uvbMainWorldScriptInjected = true;
-
-    const code = `(${function () {
-      if (window.__uvbMainWorldActive) return;
-      window.__uvbMainWorldActive = true;
-
-      function killMediaElement(el) {
-        if (!el) return;
-        try {
-          if (typeof el.pause === 'function') el.pause();
-          el.muted = true;
-          el.volume = 0;
-          if (el.src) {
-            el.src = '';
-            el.removeAttribute('src');
-          }
-          if (el.srcObject) {
-            el.srcObject = null;
-          }
-          const sources = el.querySelectorAll ? el.querySelectorAll('source') : [];
-          for (let i = 0; i < sources.length; i++) {
-            sources[i].removeAttribute('src');
-            sources[i].remove();
-          }
-          if (typeof el.load === 'function') el.load();
-          if (el.parentNode) el.parentNode.removeChild(el);
-        } catch (e) {}
-      }
-
-      const disableMediaSource = function () {
-        function BlockedMediaSource() {
-          throw new Error('MediaSource disabled by Universal Video Blocker');
-        }
-        BlockedMediaSource.isTypeSupported = function () { return false; };
-        return BlockedMediaSource;
-      };
-
-      if (window.MediaSource) {
-        try { window.MediaSource = disableMediaSource(); } catch (e) {}
-      }
-      if (window.WebKitMediaSource) {
-        try { window.WebKitMediaSource = disableMediaSource(); } catch (e) {}
-      }
-
-      try {
-        HTMLMediaElement.prototype.play = function () {
-          killMediaElement(this);
-          return Promise.reject(new DOMException('Video playback disabled by Universal Video Blocker', 'NotAllowedError'));
-        };
-      } catch (e) {}
-
-      try {
-        HTMLMediaElement.prototype.load = function () {
-          killMediaElement(this);
-        };
-      } catch (e) {}
-
-      try {
-        const origCreateObjectURL = URL.createObjectURL;
-        URL.createObjectURL = function (object) {
-          if (object && (object instanceof Blob || (window.MediaSource && object instanceof MediaSource))) {
-            const type = object.type || '';
-            if (type.includes('video') || type.includes('media') || type.includes('mp4') || type.includes('webm') || object instanceof MediaSource) {
-              return 'about:blank';
-            }
-          }
-          return origCreateObjectURL.call(this, object);
-        };
-      } catch (e) {}
-
-      try {
-        const origAttachShadow = Element.prototype.attachShadow;
-        Element.prototype.attachShadow = function (init) {
-          const shadowRoot = origAttachShadow.call(this, init);
-          if (shadowRoot) {
-            const observer = new MutationObserver(mutations => {
-              for (let i = 0; i < mutations.length; i++) {
-                const mutation = mutations[i];
-                if (mutation.addedNodes) {
-                  for (let j = 0; j < mutation.addedNodes.length; j++) {
-                    const node = mutation.addedNodes[j];
-                    if (node.nodeName === 'VIDEO' || (node.querySelector && node.querySelector('video'))) {
-                      killMediaElement(node.nodeName === 'VIDEO' ? node : node.querySelector('video'));
-                    }
-                  }
-                }
-              }
-            });
-            observer.observe(shadowRoot, { childList: true, subtree: true });
-          }
-          return shadowRoot;
-        };
-      } catch (e) {}
-
-    }})();`;
-
-    const scriptEl = document.createElement('script');
-    scriptEl.textContent = code;
-    const parent = document.head || document.documentElement;
-    if (parent) {
-      parent.insertBefore(scriptEl, parent.firstChild);
-      scriptEl.remove();
-    } else {
-      document.addEventListener('DOMContentLoaded', () => {
-        (document.head || document.documentElement).appendChild(scriptEl);
-        scriptEl.remove();
-      });
-    }
-  }
-
-  /**
-   * SECTION 2: DYNAMIC CSS BLOCKING RULES
+   * SECTION 1: CSS FOR NON-DESTRUCTIVE VIDEO HIDING
    */
   const VIDEO_BLOCK_CSS = `
     video,
@@ -185,17 +81,11 @@
     plyr,
     jwplayer,
     ytd-player,
-    ytd-watch-flexy video,
     .html5-main-video,
     .html5-video-container,
     .html5-video-player,
     .video-stream,
-    #movie_player,
-    [aria-label*="video" i],
-    [data-testid*="video" i],
-    [class*="video-player" i],
-    [class*="VideoPlayer" i],
-    iframe[src*="youtube.com"],
+    iframe[src*="youtube.com/embed"],
     iframe[src*="youtube-nocookie.com"],
     iframe[src*="vimeo.com"],
     iframe[src*="dailymotion.com"],
@@ -205,13 +95,6 @@
       visibility: hidden !important;
       opacity: 0 !important;
       pointer-events: none !important;
-      width: 0px !important;
-      height: 0px !important;
-      max-width: 0px !important;
-      max-height: 0px !important;
-      position: absolute !important;
-      top: -9999px !important;
-      left: -9999px !important;
     }
   `;
 
@@ -231,8 +114,13 @@
     }
   }
 
+  function removeBlockingStyles() {
+    const styleEl = document.getElementById('universal-video-blocker-styles');
+    if (styleEl) styleEl.remove();
+  }
+
   /**
-   * SECTION 3: DOM DESTRUCTION AND OBSERVER
+   * SECTION 2: SAFELY PAUSE & MUTED VIDEO ELEMENTS
    */
   function destroyVideoElement(el) {
     if (!el) return;
@@ -241,7 +129,7 @@
       el.muted = true;
       el.volume = 0;
 
-      if (el.src) {
+      if (el.src && !el.src.startsWith('blob:')) {
         el.src = '';
         el.removeAttribute('src');
       }
@@ -257,10 +145,6 @@
       });
 
       if (typeof el.load === 'function') el.load();
-
-      if (el.parentNode) {
-        el.parentNode.removeChild(el);
-      }
     } catch (e) {}
   }
 
@@ -277,7 +161,7 @@
 
     const embeds = root.querySelectorAll('object[type*="video"], embed[type*="video"]');
     embeds.forEach(el => {
-      try { el.remove(); } catch (e) {}
+      try { destroyVideoElement(el); } catch (e) {}
     });
   }
 
@@ -319,12 +203,15 @@
     if (isActive) return;
     isActive = true;
 
-    injectMainWorldEngine();
+    if (document.documentElement) {
+      document.documentElement.setAttribute('data-uvb-active', 'true');
+    }
+
     injectBlockingStyles();
     purgeVideosFromTree(document);
     observeDOMForVideos();
 
-    ['DOMContentLoaded', 'load', 'yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach(evt => {
+    ['DOMContentLoaded', 'load', 'yt-navigate-finish', 'yt-page-data-updated', 'popstate', 'locationchange'].forEach(evt => {
       window.addEventListener(evt, () => {
         if (isActive) purgeVideosFromTree(document);
       });
@@ -333,14 +220,17 @@
     if (!purgeInterval) {
       purgeInterval = setInterval(() => {
         if (isActive) purgeVideosFromTree(document);
-      }, 1000);
+      }, 800);
     }
   }
 
   function stopBlockerEngine() {
     isActive = false;
-    const styleEl = document.getElementById('universal-video-blocker-styles');
-    if (styleEl) styleEl.remove();
+    if (document.documentElement) {
+      document.documentElement.setAttribute('data-uvb-active', 'false');
+    }
+
+    removeBlockingStyles();
 
     if (purgeInterval) {
       clearInterval(purgeInterval);

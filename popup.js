@@ -180,10 +180,13 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="platform-domains">${p.domains.join(', ')}</span>
           </div>
         </div>
-        <label class="switch">
-          <input type="checkbox" data-platform="${key}" ${isChecked ? 'checked' : ''}>
-          <span class="slider round"></span>
-        </label>
+        <div class="platform-right">
+          <span class="status-badge ${isChecked ? 'badge-on' : 'badge-off'}">${isChecked ? 'On' : 'Off'}</span>
+          <label class="switch">
+            <input type="checkbox" data-platform="${key}" ${isChecked ? 'checked' : ''}>
+            <span class="slider round"></span>
+          </label>
+        </div>
       `;
 
       platformsGrid.appendChild(card);
@@ -193,7 +196,15 @@ document.addEventListener('DOMContentLoaded', () => {
     platformsGrid.querySelectorAll('input[data-platform]').forEach(input => {
       input.addEventListener('change', (e) => {
         const pKey = e.target.getAttribute('data-platform');
-        state.platforms[pKey] = e.target.checked;
+        const isChecked = e.target.checked;
+        state.platforms[pKey] = isChecked;
+
+        const badge = e.target.closest('.platform-right').querySelector('.status-badge');
+        if (badge) {
+          badge.textContent = isChecked ? 'On' : 'Off';
+          badge.className = `status-badge ${isChecked ? 'badge-on' : 'badge-off'}`;
+        }
+
         saveState();
       });
     });

@@ -99,16 +99,6 @@ async function syncDynamicRules(settings) {
         condition: {
           urlFilter: domain,
           isUrlFilterCaseSensitive: false,
-          resourceTypes: ['media', 'xmlhttprequest', 'other', 'sub_frame', 'websocket']
-        }
-      });
-
-      newRules.push({
-        id: nextId++,
-        priority: 1,
-        action: { type: 'block' },
-        condition: {
-          initiatorDomains: [domain],
           resourceTypes: ['media']
         }
       });
