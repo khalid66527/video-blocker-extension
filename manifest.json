@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Universal Video Blocker",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Customizable video blocker. Turn video blocking on or off for specific platforms (YouTube, Facebook, Instagram, TikTok, etc.) or custom websites.",
   "permissions": [
     "declarativeNetRequest",
     "storage",
     "activeTab",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"

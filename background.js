@@ -1,6 +1,6 @@
 /**
  * Universal Video Blocker - Background Service Worker
- * Manages storage initialization and dynamic declarativeNetRequest (DNR) network blocking rules.
+ * Manages storage initialization, startup execution, and dynamic declarativeNetRequest (DNR) network blocking rules.
  */
 
 const DEFAULT_PLATFORMS = {
@@ -41,6 +41,17 @@ const DEFAULT_PLATFORMS = {
     domains: ['dailymotion.com', 'dmcdn.net']
   }
 };
+
+const DEDICATED_VIDEO_DOMAINS = [
+  'googlevideo.com',
+  'fbcdn.net',
+  'cdninstagram.com',
+  'tiktokcdn.com',
+  'v.redd.it',
+  'ttvnw.net',
+  'vimeocdn.com',
+  'dmcdn.net'
+];
 
 const DEFAULT_SETTINGS = {
   masterEnabled: true,
@@ -92,6 +103,8 @@ async function syncDynamicRules(settings) {
     const newRules = [];
 
     blockedDomains.forEach(domain => {
+      const isDedicatedVideoCdn = DEDICATED_VIDEO_DOMAINS.some(cdn => domain.includes(cdn));
+
       newRules.push({
         id: nextId++,
         priority: 1,
@@ -102,6 +115,19 @@ async function syncDynamicRules(settings) {
           resourceTypes: ['media']
         }
       });
+
+      if (isDedicatedVideoCdn) {
+        newRules.push({
+          id: nextId++,
+          priority: 1,
+          action: { type: 'block' },
+          condition: {
+            urlFilter: domain,
+            isUrlFilterCaseSensitive: false,
+            resourceTypes: ['xmlhttprequest', 'other']
+          }
+        });
+      }
     });
 
     await chrome.declarativeNetRequest.updateDynamicRules({
@@ -113,7 +139,7 @@ async function syncDynamicRules(settings) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+function initSettingsAndRules() {
   chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains'], (result) => {
     const settings = {
       masterEnabled: result.masterEnabled !== undefined ? result.masterEnabled : DEFAULT_SETTINGS.masterEnabled,
@@ -125,6 +151,17 @@ chrome.runtime.onInstalled.addListener(() => {
       syncDynamicRules(settings);
     });
   });
+}
+
+// Immediate execution when service worker starts up or awakes
+initSettingsAndRules();
+
+chrome.runtime.onStartup.addListener(() => {
+  initSettingsAndRules();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  initSettingsAndRules();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

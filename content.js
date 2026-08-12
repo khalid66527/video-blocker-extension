@@ -2,7 +2,7 @@
  * Universal Video Blocker - Content Script
  * Executed at `document_start` in ISOLATED world.
  * Manages domain/route checking, DOM mutation monitoring, and setting data attributes
- * for inject.js (MAIN world) to block videos without CSP inline script errors.
+ * for inject.js (MAIN world) to block videos synchronously without delay.
  */
 
 (function () {
@@ -23,18 +23,6 @@
     dailymotion: ['dailymotion.com', 'dmcdn.net']
   };
 
-  // Specific route patterns where video content is primary
-  const VIDEO_ROUTES = [
-    /\/reel\//i,
-    /\/reels\//i,
-    /\/watch/i,
-    /\/shorts/i,
-    /\/videos\//i,
-    /\/story\.php/i,
-    /\/tv\//i,
-    /\/video\//i
-  ];
-
   function isDomainMatch(hostname, domain) {
     if (!hostname || !domain) return false;
     hostname = hostname.toLowerCase();
@@ -43,10 +31,10 @@
   }
 
   function isSiteBlocked(hostname, settings) {
-    if (!settings || settings.masterEnabled === false) return false;
     if (!hostname) return false;
+    if (settings && settings.masterEnabled === false) return false;
 
-    const platforms = settings.platforms || {};
+    const platforms = (settings && settings.platforms) ? settings.platforms : {};
 
     for (const key in DEFAULT_PLATFORMS) {
       if (platforms[key] !== false) {
@@ -57,9 +45,10 @@
       }
     }
 
-    const customDomains = settings.customDomains || [];
-    for (let i = 0; i < customDomains.length; i++) {
-      if (isDomainMatch(hostname, customDomains[i])) return true;
+    if (settings && Array.isArray(settings.customDomains)) {
+      for (let i = 0; i < settings.customDomains.length; i++) {
+        if (isDomainMatch(hostname, settings.customDomains[i])) return true;
+      }
     }
 
     return false;
@@ -128,6 +117,8 @@
       if (typeof el.pause === 'function') el.pause();
       el.muted = true;
       el.volume = 0;
+      el.currentTime = 0;
+      el.autoplay = false;
 
       if (el.src && !el.src.startsWith('blob:')) {
         el.src = '';
@@ -151,7 +142,7 @@
   function purgeVideosFromTree(root) {
     if (!isActive || !root || !root.querySelectorAll) return;
 
-    if (root.nodeType === Node.ELEMENT_NODE && root.matches && root.matches('video')) {
+    if (root.nodeType === Node.ELEMENT_NODE && (root.tagName === 'VIDEO' || (root.matches && root.matches('video')))) {
       destroyVideoElement(root);
       return;
     }
@@ -195,8 +186,15 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'data-src']
+      attributeFilter: ['src', 'srcset', 'data-src', 'autoplay']
     });
+  }
+
+  const mediaEventTypes = ['play', 'playing', 'canplay', 'loadedmetadata', 'loadstart'];
+  function handleMediaEvent(e) {
+    if (isActive && e.target && (e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO')) {
+      destroyVideoElement(e.target);
+    }
   }
 
   function startBlockerEngine() {
@@ -211,7 +209,11 @@
     purgeVideosFromTree(document);
     observeDOMForVideos();
 
-    ['DOMContentLoaded', 'load', 'yt-navigate-finish', 'yt-page-data-updated', 'popstate', 'locationchange'].forEach(evt => {
+    mediaEventTypes.forEach(evt => {
+      window.addEventListener(evt, handleMediaEvent, true);
+    });
+
+    ['DOMContentLoaded', 'load', 'yt-navigate-finish', 'yt-page-data-updated', 'popstate', 'locationchange', 'hashchange'].forEach(evt => {
       window.addEventListener(evt, () => {
         if (isActive) purgeVideosFromTree(document);
       });
@@ -220,7 +222,7 @@
     if (!purgeInterval) {
       purgeInterval = setInterval(() => {
         if (isActive) purgeVideosFromTree(document);
-      }, 800);
+      }, 300);
     }
   }
 
@@ -231,6 +233,10 @@
     }
 
     removeBlockingStyles();
+
+    mediaEventTypes.forEach(evt => {
+      window.removeEventListener(evt, handleMediaEvent, true);
+    });
 
     if (purgeInterval) {
       clearInterval(purgeInterval);
@@ -255,7 +261,13 @@
     });
   }
 
-  // Initialize
+  // Synchronous startup on document_start for default platforms
+  const initialHostname = window.location.hostname || '';
+  if (isSiteBlocked(initialHostname, null)) {
+    startBlockerEngine();
+  }
+
+  // Fetch stored settings asynchronously
   checkAndApplySettings();
 
   // Listen for live setting changes

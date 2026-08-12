@@ -10,8 +10,31 @@
   if (window.__uvbMainWorldActive) return;
   window.__uvbMainWorldActive = true;
 
+  const DEFAULT_BLOCKED_DOMAINS = [
+    'youtube.com', 'youtu.be', 'googlevideo.com',
+    'facebook.com', 'fb.watch', 'fbcdn.net',
+    'instagram.com', 'cdninstagram.com',
+    'tiktok.com', 'tiktokcdn.com',
+    'twitter.com', 'x.com', 'twimg.com',
+    'twitch.tv', 'ttvnw.net',
+    'reddit.com', 'v.redd.it',
+    'vimeo.com', 'vimeocdn.com',
+    'dailymotion.com', 'dmcdn.net'
+  ];
+
   function isBlocked() {
-    return document.documentElement && document.documentElement.getAttribute('data-uvb-active') === 'true';
+    const attr = document.documentElement ? document.documentElement.getAttribute('data-uvb-active') : null;
+    if (attr === 'false') return false;
+    if (attr === 'true') return true;
+
+    // Fallback: check hostname synchronously on page start before content script storage callback completes
+    const host = (window.location.hostname || '').toLowerCase();
+    if (!host) return false;
+    for (let i = 0; i < DEFAULT_BLOCKED_DOMAINS.length; i++) {
+      const d = DEFAULT_BLOCKED_DOMAINS[i];
+      if (host === d || host.endsWith('.' + d)) return true;
+    }
+    return false;
   }
 
   function killMediaElement(el) {
@@ -46,7 +69,7 @@
       return new OrigMediaSource(a, b, c);
     }
     BlockedMediaSource.isTypeSupported = function (type) {
-      if (isBlocked() && type && (type.includes('video') || type.includes('mp4') || type.includes('webm') || type.includes('avc1'))) {
+      if (isBlocked() && type && (type.includes('video') || type.includes('mp4') || type.includes('webm') || type.includes('avc1') || type.includes('vp9') || type.includes('vp8'))) {
         return false;
       }
       return OrigMediaSource.isTypeSupported ? OrigMediaSource.isTypeSupported(type) : false;
@@ -64,6 +87,18 @@
     try {
       const OrigWKMS = window.WebKitMediaSource;
       window.WebKitMediaSource = disableMediaSource(OrigWKMS);
+    } catch (e) {}
+  }
+
+  if (window.SourceBuffer) {
+    try {
+      const origAppend = SourceBuffer.prototype.appendBuffer;
+      SourceBuffer.prototype.appendBuffer = function (data) {
+        if (isBlocked()) {
+          throw new Error('SourceBuffer.appendBuffer blocked by Universal Video Blocker');
+        }
+        return origAppend.call(this, data);
+      };
     } catch (e) {}
   }
 
