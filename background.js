@@ -66,7 +66,10 @@ const DEFAULT_SETTINGS = {
     vimeo: true,
     dailymotion: true
   },
-  customDomains: []
+  customDomains: [],
+  lockModeActive: false,
+  lockedUntil: null,
+  lockDurationTotalMs: 0
 };
 
 async function syncDynamicRules(settings) {
@@ -74,7 +77,9 @@ async function syncDynamicRules(settings) {
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
     const removeRuleIds = existingRules.map(r => r.id);
 
-    if (!settings || settings.masterEnabled === false) {
+    const isLocked = settings && settings.lockModeActive === true;
+
+    if (!settings || (!isLocked && settings.masterEnabled === false)) {
       await chrome.declarativeNetRequest.updateDynamicRules({
         removeRuleIds,
         addRules: []
@@ -140,11 +145,15 @@ async function syncDynamicRules(settings) {
 }
 
 function initSettingsAndRules() {
-  chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains'], (result) => {
+  chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains', 'lockModeActive', 'lockedUntil', 'lockDurationTotalMs'], (result) => {
+    const isLocked = !!result.lockModeActive;
     const settings = {
-      masterEnabled: result.masterEnabled !== undefined ? result.masterEnabled : DEFAULT_SETTINGS.masterEnabled,
+      masterEnabled: isLocked ? true : (result.masterEnabled !== undefined ? result.masterEnabled : DEFAULT_SETTINGS.masterEnabled),
       platforms: result.platforms || DEFAULT_SETTINGS.platforms,
-      customDomains: result.customDomains || DEFAULT_SETTINGS.customDomains
+      customDomains: result.customDomains || DEFAULT_SETTINGS.customDomains,
+      lockModeActive: isLocked,
+      lockedUntil: result.lockedUntil || null,
+      lockDurationTotalMs: result.lockDurationTotalMs || 0
     };
 
     chrome.storage.local.set(settings, () => {
@@ -166,7 +175,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'local') {
-    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains'], (settings) => {
+    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains', 'lockModeActive', 'lockedUntil', 'lockDurationTotalMs'], (settings) => {
       syncDynamicRules(settings);
     });
   }

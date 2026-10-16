@@ -1,5 +1,6 @@
 /**
  * Universal Video Blocker - Popup Logic
+ * Includes Strict Lock Mode with live countdown and manual unlock after expiration.
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -68,12 +69,19 @@ document.addEventListener('DOMContentLoaded', () => {
       vimeo: true,
       dailymotion: true
     },
-    customDomains: []
+    customDomains: [],
+    lockModeActive: false,
+    lockedUntil: null,
+    lockDurationTotalMs: 0
   };
 
   let currentHostname = '';
+  let countdownTimerId = null;
+  let toastTimeoutId = null;
+  let pendingLockDurationMs = 0;
 
-  // Elements
+  // DOM Elements
+  const appContainer = document.querySelector('.app-container');
   const masterToggle = document.getElementById('master-toggle');
   const masterStatusBar = document.getElementById('master-status-bar');
   const masterStatusText = document.getElementById('master-status-text');
@@ -87,6 +95,42 @@ document.addEventListener('DOMContentLoaded', () => {
   const customDomainsList = document.getElementById('custom-domains-list');
   const activeSummaryEl = document.getElementById('active-summary');
 
+  // Strict Lock Elements
+  const lockStatusPill = document.getElementById('lock-status-pill');
+  const lockSetupContainer = document.getElementById('lock-setup-container');
+  const lockDaysInput = document.getElementById('lock-days-input');
+  const lockHoursInput = document.getElementById('lock-hours-input');
+  const lockMinutesInput = document.getElementById('lock-minutes-input');
+  const startLockBtn = document.getElementById('start-lock-btn');
+  const lockActiveContainer = document.getElementById('lock-active-container');
+  const cdDays = document.getElementById('cd-days');
+  const cdHours = document.getElementById('cd-hours');
+  const cdMinutes = document.getElementById('cd-minutes');
+  const cdSeconds = document.getElementById('cd-seconds');
+  const lockMessageText = document.getElementById('lock-message-text');
+  const lockUntilDate = document.getElementById('lock-until-date');
+  const unlockBtn = document.getElementById('unlock-btn');
+  const unlockBtnText = document.getElementById('unlock-btn-text');
+
+  // Modal & Toast Elements
+  const lockConfirmModal = document.getElementById('lock-confirm-modal');
+  const modalDurationText = document.getElementById('modal-duration-text');
+  const modalCancelBtn = document.getElementById('modal-cancel-btn');
+  const modalConfirmBtn = document.getElementById('modal-confirm-btn');
+  const lockToast = document.getElementById('lock-toast');
+  const lockToastText = document.getElementById('lock-toast-text');
+
+  function showLockToast(message = '🔒 Strict Lock is active! You cannot turn off video blocking.') {
+    if (!lockToast || !lockToastText) return;
+    if (toastTimeoutId) clearTimeout(toastTimeoutId);
+    lockToastText.textContent = message;
+    lockToast.style.display = 'flex';
+    toastTimeoutId = setTimeout(() => {
+      lockToast.style.display = 'none';
+      toastTimeoutId = null;
+    }, 3000);
+  }
+
   function isDomainMatch(hostname, domain) {
     if (!hostname || !domain) return false;
     hostname = hostname.toLowerCase();
@@ -95,7 +139,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function isHostnameBlocked(hostname) {
-    if (!state.masterEnabled || !hostname) return false;
+    const isMasterActive = state.masterEnabled || state.lockModeActive;
+    if (!isMasterActive || !hostname) return false;
 
     // Check platforms
     for (const key in PLATFORMS_DATA) {
@@ -127,8 +172,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function updateMasterUI() {
-    masterToggle.checked = state.masterEnabled;
-    if (state.masterEnabled) {
+    const isMasterActive = state.masterEnabled || state.lockModeActive;
+    masterToggle.checked = isMasterActive;
+
+    if (state.lockModeActive) {
+      masterStatusBar.className = 'status-bar active';
+      masterStatusText.textContent = 'Video Blocker is LOCKED Active';
+    } else if (state.masterEnabled) {
       masterStatusBar.className = 'status-bar active';
       masterStatusText.textContent = 'Video Blocker is Active';
     } else {
@@ -192,9 +242,18 @@ document.addEventListener('DOMContentLoaded', () => {
       platformsGrid.appendChild(card);
     });
 
-    // Add toggle listeners
+    // Add toggle listeners with strict lock guard
     platformsGrid.querySelectorAll('input[data-platform]').forEach(input => {
       input.addEventListener('change', (e) => {
+        if (state.lockModeActive) {
+          e.preventDefault();
+          // Restore previous visual state
+          const pKey = e.target.getAttribute('data-platform');
+          e.target.checked = state.platforms[pKey] !== false;
+          showLockToast('🔒 Strict Lock is active! You cannot turn off platform blocking.');
+          return;
+        }
+
         const pKey = e.target.getAttribute('data-platform');
         const isChecked = e.target.checked;
         state.platforms[pKey] = isChecked;
@@ -230,6 +289,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     customDomainsList.querySelectorAll('.remove-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
+        if (state.lockModeActive) {
+          showLockToast('🔒 Strict Lock is active! You cannot remove blocked websites.');
+          return;
+        }
+
         const index = parseInt(e.target.getAttribute('data-index'), 10);
         state.customDomains.splice(index, 1);
         saveState();
@@ -246,29 +310,171 @@ document.addEventListener('DOMContentLoaded', () => {
     activeSummaryEl.textContent = `Active blocking on ${count} source${count === 1 ? '' : 's'}`;
   }
 
-  function saveState() {
+  // Strict Lock Logic and Countdown UI
+  function updateLockUI() {
+    if (!state.lockModeActive) {
+      if (countdownTimerId) {
+        clearInterval(countdownTimerId);
+        countdownTimerId = null;
+      }
+      appContainer.classList.remove('controls-locked');
+      lockStatusPill.className = 'lock-status-pill';
+      lockStatusPill.textContent = 'Unlocked';
+      lockSetupContainer.style.display = 'block';
+      lockActiveContainer.style.display = 'none';
+      return;
+    }
+
+    // Strict Lock is active
+    appContainer.classList.add('controls-locked');
+    lockSetupContainer.style.display = 'none';
+    lockActiveContainer.style.display = 'flex';
+
+    if (state.lockedUntil) {
+      const untilDate = new Date(state.lockedUntil);
+      lockUntilDate.textContent = `Target: ${untilDate.toLocaleDateString()} at ${untilDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    }
+
+    renderCountdownTick();
+
+    if (!countdownTimerId) {
+      countdownTimerId = setInterval(renderCountdownTick, 1000);
+    }
+  }
+
+  function renderCountdownTick() {
+    if (!state.lockModeActive || !state.lockedUntil) {
+      if (countdownTimerId) {
+        clearInterval(countdownTimerId);
+        countdownTimerId = null;
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const remainingMs = Math.max(0, state.lockedUntil - now);
+
+    if (remainingMs > 0) {
+      // Timer is still running
+      const days = Math.floor(remainingMs / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((remainingMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const mins = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+      const secs = Math.floor((remainingMs % (1000 * 60)) / 1000);
+
+      cdDays.textContent = String(days).padStart(2, '0');
+      cdHours.textContent = String(hours).padStart(2, '0');
+      cdMinutes.textContent = String(mins).padStart(2, '0');
+      cdSeconds.textContent = String(secs).padStart(2, '0');
+
+      lockStatusPill.className = 'lock-status-pill active';
+      lockStatusPill.textContent = 'Locked Active';
+
+      lockMessageText.textContent = '🔒 Strict Lock is ACTIVE. Video blocker cannot be turned off.';
+
+      // Unlock button remains disabled during active countdown
+      unlockBtn.disabled = true;
+      unlockBtn.classList.remove('ready-to-unlock');
+      unlockBtnText.textContent = '🔒 Locked (Timer Running)';
+    } else {
+      // Timer has expired!
+      // USER REQUIREMENT: Do NOT automatically unlock!
+      // Blocker remains active, but user can now choose to unlock manually.
+      cdDays.textContent = '00';
+      cdHours.textContent = '00';
+      cdMinutes.textContent = '00';
+      cdSeconds.textContent = '00';
+
+      lockStatusPill.className = 'lock-status-pill completed';
+      lockStatusPill.textContent = 'Time Completed';
+
+      lockMessageText.textContent = '🎉 Time has ended! Video blocking remains ACTIVE. You can now unlock whenever you are ready.';
+
+      // Enable the unlock button
+      unlockBtn.disabled = false;
+      unlockBtn.classList.add('ready-to-unlock');
+      unlockBtnText.textContent = '🔓 Unlock Controls Now';
+    }
+  }
+
+  function calculateInputDurationMs() {
+    const days = Math.max(0, parseInt(lockDaysInput.value, 10) || 0);
+    const hours = Math.max(0, parseInt(lockHoursInput.value, 10) || 0);
+    const mins = Math.max(0, parseInt(lockMinutesInput.value, 10) || 0);
+
+    return ((days * 24 + hours) * 60 + mins) * 60 * 1000;
+  }
+
+  function formatDurationText(totalMs) {
+    const totalMinutes = Math.floor(totalMs / (1000 * 60));
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    const mins = totalMinutes % 60;
+
+    const parts = [];
+    if (days > 0) parts.push(`${days} day${days > 1 ? 's' : ''}`);
+    if (hours > 0) parts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+    if (mins > 0) parts.push(`${mins} min${mins > 1 ? 's' : ''}`);
+
+    return parts.length > 0 ? parts.join(' ') : '0 mins';
+  }
+
+  function reloadActiveTab() {
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.query) return;
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (chrome.runtime && chrome.runtime.lastError) return;
+      if (tabs && tabs.length > 0 && tabs[0] && tabs[0].id) {
+        const url = tabs[0].url || '';
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          chrome.tabs.reload(tabs[0].id, { bypassCache: false }, () => {
+            if (chrome.runtime && chrome.runtime.lastError) {
+              // Suppress error if tab was closed or navigating
+            }
+          });
+        }
+      }
+    });
+  }
+
+  function saveState(callback) {
     chrome.storage.local.set({
       masterEnabled: state.masterEnabled,
       platforms: state.platforms,
-      customDomains: state.customDomains
+      customDomains: state.customDomains,
+      lockModeActive: state.lockModeActive || false,
+      lockedUntil: state.lockedUntil || null,
+      lockDurationTotalMs: state.lockDurationTotalMs || 0
     }, () => {
       updateMasterUI();
       updateCurrentSiteUI();
       renderCustomDomains();
       updateFooterSummary();
+      updateLockUI();
+      reloadActiveTab();
+      if (typeof callback === 'function') callback();
     });
   }
 
   function loadState() {
-    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains'], (result) => {
+    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains', 'lockModeActive', 'lockedUntil', 'lockDurationTotalMs'], (result) => {
       if (result.masterEnabled !== undefined) state.masterEnabled = result.masterEnabled;
       if (result.platforms) state.platforms = result.platforms;
       if (result.customDomains) state.customDomains = result.customDomains;
+
+      state.lockModeActive = !!result.lockModeActive;
+      state.lockedUntil = result.lockedUntil || null;
+      state.lockDurationTotalMs = result.lockDurationTotalMs || 0;
+
+      // When lockModeActive is true, masterEnabled MUST be true!
+      if (state.lockModeActive) {
+        state.masterEnabled = true;
+      }
 
       updateMasterUI();
       renderPlatforms();
       renderCustomDomains();
       updateFooterSummary();
+      updateLockUI();
       detectCurrentTab();
     });
   }
@@ -288,15 +494,26 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Event Listeners
+
+  // Master switch
   masterToggle.addEventListener('change', (e) => {
+    if (state.lockModeActive) {
+      e.preventDefault();
+      masterToggle.checked = true;
+      showLockToast('🔒 Strict Lock is active! You cannot turn off video blocking.');
+      return;
+    }
+
     state.masterEnabled = e.target.checked;
     saveState();
   });
 
+  // Search
   platformSearchInput.addEventListener('input', (e) => {
     renderPlatforms(e.target.value);
   });
 
+  // Custom Domain Add
   addDomainForm.addEventListener('submit', (e) => {
     e.preventDefault();
     let raw = customDomainInput.value.trim().toLowerCase();
@@ -312,16 +529,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Quick Toggle Current Site
   quickToggleBtn.addEventListener('click', () => {
     if (!currentHostname) return;
+
+    if (state.lockModeActive) {
+      showLockToast('🔒 Strict Lock is active! You cannot change blocking status.');
+      return;
+    }
 
     const platformKey = findPlatformKeyForHostname(currentHostname);
 
     if (platformKey) {
-      // Toggle platform
       state.platforms[platformKey] = !state.platforms[platformKey];
     } else {
-      // Custom domain toggle
       const index = state.customDomains.indexOf(currentHostname);
       if (index >= 0) {
         state.customDomains.splice(index, 1);
@@ -334,6 +555,87 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPlatforms(platformSearchInput.value);
   });
 
-  // Init
+  // Strict Lock Preset Buttons
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const days = parseInt(btn.getAttribute('data-days'), 10) || 0;
+      const hours = parseInt(btn.getAttribute('data-hours'), 10) || 0;
+      const mins = parseInt(btn.getAttribute('data-mins'), 10) || 0;
+
+      lockDaysInput.value = days;
+      lockHoursInput.value = hours;
+      lockMinutesInput.value = mins;
+    });
+  });
+
+  // Start Lock Trigger
+  startLockBtn.addEventListener('click', () => {
+    const totalMs = calculateInputDurationMs();
+    if (totalMs < 60000) {
+      showLockToast('⚠️ Please enter at least 1 minute duration.');
+      return;
+    }
+
+    pendingLockDurationMs = totalMs;
+    modalDurationText.textContent = formatDurationText(totalMs);
+    lockConfirmModal.style.display = 'flex';
+  });
+
+  // Modal Cancel
+  modalCancelBtn.addEventListener('click', () => {
+    lockConfirmModal.style.display = 'none';
+    pendingLockDurationMs = 0;
+  });
+
+  // Modal Confirm
+  modalConfirmBtn.addEventListener('click', () => {
+    if (pendingLockDurationMs < 60000) {
+      lockConfirmModal.style.display = 'none';
+      return;
+    }
+
+    const now = Date.now();
+    state.lockModeActive = true;
+    state.lockedUntil = now + pendingLockDurationMs;
+    state.lockDurationTotalMs = pendingLockDurationMs;
+    state.masterEnabled = true;
+
+    lockConfirmModal.style.display = 'none';
+    pendingLockDurationMs = 0;
+
+    saveState(() => {
+      showLockToast('🔒 Strict Lock activated! Video blocking is now locked ON.');
+    });
+  });
+
+  // Unlock Trigger (Enabled when time expires)
+  unlockBtn.addEventListener('click', () => {
+    if (!state.lockModeActive) return;
+
+    const now = Date.now();
+    if (state.lockedUntil && now < state.lockedUntil) {
+      showLockToast('⏳ Time is not up yet! You cannot unlock until the timer finishes.');
+      return;
+    }
+
+    // User explicitly unlocks after time completion
+    state.lockModeActive = false;
+    state.lockedUntil = null;
+    state.lockDurationTotalMs = 0;
+
+    saveState(() => {
+      showLockToast('🔓 Controls unlocked! Video blocking remains active until changed.');
+    });
+  });
+
+  // Click outside modal to close
+  lockConfirmModal.addEventListener('click', (e) => {
+    if (e.target === lockConfirmModal) {
+      lockConfirmModal.style.display = 'none';
+      pendingLockDurationMs = 0;
+    }
+  });
+
+  // Initialize
   loadState();
 });

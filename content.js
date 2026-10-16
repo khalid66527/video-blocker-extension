@@ -32,7 +32,8 @@
 
   function isSiteBlocked(hostname, settings) {
     if (!hostname) return false;
-    if (settings && settings.masterEnabled === false) return false;
+    const isLocked = settings && settings.lockModeActive === true;
+    if (!isLocked && settings && settings.masterEnabled === false) return false;
 
     const platforms = (settings && settings.platforms) ? settings.platforms : {};
 
@@ -249,7 +250,7 @@
   }
 
   function checkAndApplySettings() {
-    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains'], (settings) => {
+    chrome.storage.local.get(['masterEnabled', 'platforms', 'customDomains', 'lockModeActive', 'lockedUntil'], (settings) => {
       const hostname = window.location.hostname || '';
       const shouldBlock = isSiteBlocked(hostname, settings);
 
